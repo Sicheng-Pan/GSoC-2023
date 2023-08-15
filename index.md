@@ -124,7 +124,7 @@ pub struct RThreadHandle<T> {
 }  
 ```
 
-I also wrapped a few methods from `thread::JoinHandle`, such as `join` and `is_finished`, and exported to the *R* side so that users could manipulate the join handle. I also added a additional toggle option `in_background` in the `collect` method for `LazyFrame`, so that users have the option to run a query in background like this:
+I also wrapped a few methods from `thread::JoinHandle`, such as `join` and `is_finished`, and exported to the *R* side so that users could manipulate the join handle. I also added a additional toggle option `collect_in_background` in the `collect` method for `LazyFrame`, so that users have the option to run a query in background like this:
 
 ```R
 > lf <- polars::pl$LazyFrame(mtcars)$select(polars::pl$col("mpg") * 0.42)
