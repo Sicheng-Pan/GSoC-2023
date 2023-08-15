@@ -226,7 +226,7 @@ shape: (32, 1)
 └───────┘
 ```
 
-Running the queries in background could lead to significant performance boosts! You could run the [script](https://github.com/pola-rs/r-polars/blob/main/inst/misc/benchmark_rbackground.R) yourself to test it out!
+Running the queries in background could lead to significant performance boosts if *R* evaluations are the bottleneck of the queries. You could run the [script](https://github.com/pola-rs/r-polars/blob/main/inst/misc/benchmark_rbackground.R) yourself to see the performance of background execution under different scenarios.
 
 And the error messages from the background also play nicely with our new error handling pipeline:
 
