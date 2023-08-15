@@ -140,7 +140,7 @@ shape: (32, 1)
 │ 8.82  │
 │ 9.576 │
 │ 8.988 │
-│ …     │
+│ ...   │
 │ 6.636 │
 │ 8.274 │
 │ 6.3   │
@@ -218,7 +218,7 @@ shape: (32, 1)
 │ 8.82  │
 │ 9.576 │
 │ 8.988 │
-│ …     │
+│ ...   │
 │ 6.636 │
 │ 8.274 │
 │ 6.3   │
@@ -226,7 +226,10 @@ shape: (32, 1)
 └───────┘
 ```
 
+Running the queries in background could lead to significant performance boosts! You could run the [script](https://github.com/pola-rs/r-polars/blob/main/inst/misc/benchmark_rbackground.R) yourself to test it out!
+
 And the error messages from the background also play nicely with our new error handling pipeline:
+
 ```R
 > lf <- polars::pl$LazyFrame(mtcars)$select(polars::pl$col("mpg")$map(\(x) y, in_background = TRUE))
 > th <- lf$collect(collect_in_background = TRUE)
@@ -239,11 +242,13 @@ Error: Execution halted with the following contexts
 
 ## More *polars* features
 
-### `LazyFrame` schema
+I've also exported various *polars* features to *R* along the way. Here is a list of them:
+
+### `LazyFrame` columns, dtypes, schema
 
 > Relevant PR: [#250](https://github.com/pola-rs/r-polars/pull/250)
 
-### `LazyFrame` profiling and optimizaion toggles
+### `LazyFrame` profile, optimizaion toggles
 
 > Relevant PR: [#323](https://github.com/pola-rs/r-polars/pull/323)
 
@@ -255,12 +260,16 @@ Error: Execution halted with the following contexts
 
 > Relevant PR: [#343](https://github.com/pola-rs/r-polars/pull/343)
 
-### More statistic functions
+### More statistic functions: covariance, correlation, and their rolling versions
 
 > Relevant PR: [#351](https://github.com/pola-rs/r-polars/pull/351)
 
-## Future works
+## Status of the project
 
-## What I've learned
+All of my works mentioned above have been merged to the main branch of the project, and they should be available in its next release ([0.8.0](https://github.com/pola-rs/r-polars/blob/main/NEWS.md)). Hopefully they could bring better experiences for the *rpolars* users!
+
+In terms of future works, the *rpolars* project is not yet complete. Although I've implemented a few of the missing features from *polars*, many more still remains, such as `fold` and `reduce` for dataframes. Also more improvements could be made for this project (e.g. parallized I/O between *R* and *Rust*). I would definitely help contribute to this project if time permits. 
 
 ## Acknowledgement
+
+Thanks a lot for the *rpolars* and *polars* community, especially my mentor [Søren Havelund Welling](https://github.com/sorhawell)! They provided tremendous help and support for my GSoC project, and I really appreciate their comments and suggestions for my project!
