@@ -10,45 +10,96 @@ title: Pola-rs in R
 
 > Relevant PR: [#233](https://github.com/pola-rs/r-polars/pull/233)
 
-Error handling could be tricky to done properly and efficiently. It would be especially hard for users to debug their codes if we do not provide informative error messages when errors occur, but it could also be hard for developers to manually guard against all possible errors in the code. Consider the following example:
+Error handling can be tricky to done properly and efficiently. It would be especially hard for users to debug their codes if we do not provide informative error messages when errors occur, but it is hard for developers to manually guard against all possible errors in the code. We would like to have a mechanism that is informative enough for users and simple enough for developers.
+
+### Motivting example
+
+Consider the following:
 
 ```R
-> f <- function() {
-    # Internals not visible by users
-    g <- function() {
-        h
-    }
-    g()
-}
+> f <- \() { g <- \(x) { x + 1 }; g("?") }
 > f()
-Error in g() : object 'h' not found
+Error in x + 1 : non-numeric argument to binary operator
 ```
 
-The users could be completely confused by what the error message is saying, and this could be even worse for errors from the non-*R* codes in the library. Luckily, *Rust* has the `Result<T, E>` type that allows us to recover from errors and handle them properly in *Rust* codes, and it is not hard for us to export it to *R* with the help of the [*extendr*](https://github.com/extendr/extendr) crate. 
+The users could be completely confused by what the error message is saying if the internals of the function `f` is not visible, and this could be even worse for errors from the non-*R* codes in the library. A better error message here could look like:
 
-The most common error type was `E = String`, which suggests that the errors are `String` error messages. We could always manually compose `String` error messages like this:
+```R
+Error encountered:
+    When calling `f`:
+        When calling `g`:
+            When evaluating `x + 1`:
+                Expected numeric argument `x`, but got string value "?"
+```
+
+Of course this could be achieved in plain *R* with the condition system (e.g. `tryCatch`), but this approach is not likely to be scallable. It would require extra efforts for developers to consider what could go wrong, as well as how to handle them properly, whenever they are writing new codes, and it is likely that some edge cases will be missed. Always using error handlers (e.g. `tryCatch`) to wrap around potentially errorneous codes could also break the overall sanity of the codebase.
+
+Moreover, even if we have a better error message, the users may not have a easy way to recover from the error by its causes. For example, the users could tolerate certain causes of error because those are less severe, but it is hard for them to check this against pure error message strings. It would be better if the error could contain all relevant information in an accessible way.
+
+### Requirements for a good error handling mechanism
+
+Inspired by the example above, we hope that a good error handling system should be:
+
+- Informative for users, so that they can easily know where things go wrong
+- Structural for users, so that they can easily extract relevant information
+- Explicit for developers, so that they know where to handle potential errors
+- Simple for developers, so that error handling will not be costly during development
+
+### `Result<T, E>` in *Rust*
+
+To implement an error handling system satisfying the above criterias, we could use either *R* or *Rust* to achieve this. I choose *Rust* because it has the `Result<T, E>` type, which is designed for recoverable errors, and the related traits (i.e. interfaces) implemented for `Result<T, E>` can greatly facilitate us to handle errors easily. We can use it as the return type for our functions, so that the developers knows when to expect return values that contains potential errors, and it is not hard for us to export it to *R* with the help of the [*extendr*](https://github.com/extendr/extendr) crate.
+
+In the following examples, I will show how we could use `Result<T, E>` to make error handling easier for developers. A value in `Result<T, E>` type is either a `Ok(t: T)`, which indicates a successful result with value `t` of type `T`, or an `Err(e: E)`, which indicates an errorneous result with error `e` of type `E`. For simplicity, let's set the error type to `E = String` for now, which suggests that the errors are `String` error messages. We will change this later. Let's first construct a function that should convert a 64-bit signed integer to a 64-bit unsigned integer, but actually always return an error message because it is not implemented yet:
 
 ```rust
 fn i64_to_u64(x: i64) -> Result<u64, String> {
-    u64::try_from(x).map_err(|e| format!("{e:?}"))
+    Err(String::from("nobody implements this!"))
 }
 ```
 
-But this could be very tedious to do when the same error occurs in multiple places, or we want to properly handle a nested error like this:
+We just stated that its return type is `Result<u64, String>`, so the developers using this function will know that this function could produce errors, and the compiler will make sure that the developers have explicitly handled the potential error (e.g. ignoring it). Here's how this could be used:
 
 ```rust
-fn r_task() -> Result<u64, String> {
-    i64_to_u64(-1).map_err(|e| format!("When converting i64 to u64: {e}"))
+fn ignore_error() -> u64 {
+    i64_to_u64(0).unwrap() + 1
 }
 ```
 
-To fix such issues, we would need a layered structure of errors, and we hope to make the construction of errors easy for developers and the appearance of errors nice for users. So I implemented our own error layer type `Rctx`, error type `RPolarsErr`, and result type `RResult<T>`:
+The function above always try to get a successfully returned unsigned integer from `i64_to_u64` and then add one, but it will panic if `i64_to_u64` generates an error. We could do better:
+
+```rust
+fn handle_error() -> Result<u64, String> {
+    Ok(i64_to_u64(0)? + 1)
+}
+```
+
+This function looks very similar to the previous one. Both `?` and `unwrap` tries to get the successful result from `i64_to_u64`, but with a major difference: the `?` will return the error as the return value, but `unwrap()` will panic immediately. In this way we can propagate the error to the next level.
+
+We can also modify the error on the fly:
+
+```rust
+fn handle_error_escalate() -> Result<u64, String> {
+    Ok(i64_to_u64(0).map_err(|e| format!("When converting signed 0 to unsigned integer: {e}"))? + 1)
+}
+```
+
+The error message has been prepended with some contexts, as suggested by the format string `format!(...)`. 
+
+### Classful, layered errors
+
+The vanilla `Result<T, E = String>` can be used to construct decent error message and can already improve the error handling experiences for developers, but it's not enough. As suggested above, error messages alone is not very accessible for users, while manually formatting nested error message is bothering. It's time to invent our own error type `E`!
+
+So I implemented the following:
+
+- `Rctx`, which is the construction units of our errors
+- `RPolarsErr`, which is basically a stack of `Rctx`s, just like stack traces 
+- `RResult<T>`, which is an alias of `Result<T, E = RPolarsErr>`, so we do not need to specify `E` every time
 
 ```rust
 #[derive(thiserror::Error)]
 pub enum Rctx {
-    #[error("Got value [{0}]")]
-    BadVal(String),
+    #[error("Possibly because {0}")]
+    Hint(String),
     #[error("When {0}")]
     When(String),
     // And more
@@ -62,46 +113,69 @@ pub struct RPolarsErr {
 pub type RResult<T> = Result<T, RPolarsErr>;
 ```
 
-Notice that I used the [*thiserror*](https://github.com/dtolnay/thiserror) crate to generate nice error messages. The functionalities of `RPolarsErr` are similar to the [*anyhow*](https://github.com/dtolnay/anyhow) crate, but I did not use it since I could not find a way to extract the contexts in `anyhow::Error`, and I could not find a way to directly implement the `anyhow::Context` trait as it is sealed within the crate. I also defined and implemented a `WithRctx<T>` trait to facilitate the construction of `RResult<T>`:
+I used the [*thiserror*](https://github.com/dtolnay/thiserror) crate to generate nice error messages. The functionalities of `RPolarsErr` are similar to the [*anyhow*](https://github.com/dtolnay/anyhow) crate, but I did not use it since I could not find a way to extract the contexts in `anyhow::Error`, and I could not find a way to directly implement the `anyhow::Context` trait as it is sealed within the crate.
+
+I also defined and implemented a `WithRctx<T>` trait to facilitate the construction of `RResult<T>`:
 
 ```rust
 pub trait WithRctx<T> {
-    fn bad_val(self, val: impl Into<String>) -> RResult<T>;
+    // Push a `Rctx::Hint` to the error if there is one
+    fn hint(self, val: impl Into<String>) -> RResult<T>;
+    // Push a `Rctx::When` to the error if there is one
     fn when(self, env: impl Into<String>) -> RResult<T>;
     // And more
 }
 
 impl<T, E: Into<RPolarsErr>> WithRctx<T> for Result<T, E> {
-    // Implement the trait for all Results convertible to RResult
+    // Implement the trait for all `Result<T, E>` convertible to `RResult<T>`
+}
+
+fn rerr<T>() -> RResult<T> {
+    // Generate a `RResult<T>::Err` with an empty `RPolarsErr`
 }
 ```
 
-Later, I implemented the `std::fmt::Display` trait for `RPolarsErr`, and updated the *R* wrappers to handle `RResult`. Finally, we have a decent mechanism to handle errors for this project! The code for `i64_to_u64` and `r_task` in *Rust* can be as simple as:
+An important note is that the methods in `WithRctx<T>` have zero-costs: the `Rctx`s are created and appended only when necessary. If the result is `Ok(...)`, it will be directly returned as is!
+
+With everything above, we have already addressed the concerns for developers, and we have a simple mechanism to construct and handle errors! Checkout the following example:
 
 ```rust
-fn i64_to_u64(x: i64) -> RResult<u64> {
-    u64::try_from(x).bad_val(x.to_string()).when("converting from i64 to u64")
+fn i64_to_u64_nice(x: i64) -> RResult<u64> {
+    rerr().hint("nobody implements this!").when("converting from i64 to u64")
 }
 
-fn r_task() -> RResult<u64> {
-    i64_to_u64(-1).when("deliberately making an error in Rust")
+fn handle_error_nice() -> RResult<u64> {
+    Ok(i64_to_u64_nice(0).when("trying out conversion in Rust")? + 1)
 }
 ```
 
-And on the `R` side:
+When `handle_error_nice` is called, we will construct a stack of errors. The only remaining tasks are displaying it properly to the users and provide a structural output so that the users could easily access the individual `Rctx`s.
+
+Thus I implemented the `std::fmt::Display` trait for `RPolarsErr`, which can convert `RPolarsErr` to a pretty string. I also exposed an `RPolarsErr` method in *R* so that users can directly access the `Rctx`s as a list, and updated the *R* wrappers to handle `RResult`. With all these implemented, we could test it out:
 
 ```R
-> r_task() |> unwrap("try unwrapping an error")
+> handle_error_nice() |> unwrap("try unwrapping an error")
+> result <- handle_error_nice()
+> result |> unwrap("try unwrapping an error in R")
 Error: Execution halted with the following contexts
-   0: In R: try unwrapping an error
-   0: During function call [unwrap(r_task(), "try unwrapping an error")]
-   1: When deliberately making an error in Rust
+   0: In R: try unwrapping an error in R
+   0: During function call [unwrap(result, "try unwrapping an error in R")]
+   1: When trying out conversion in Rust
    2: When converting from i64 to u64
-   3: Got value [-1]
-   4: TryFromIntError(())
+   3: Possibly because nobody implements this!
+> result$err$contexts()
+$When
+[1] "trying out conversion in Rust"
+
+$When
+[1] "converting from i64 to u64"
+
+$Hint
+[1] "nobody implements this!"
 ```
 
 Now it's the time to refactor the existing error handling codes for the project with the new mechanism! Although this is still an on-going process, many common functions have already been updated! For example:
+
 ```R
 > polars::pl$scan_ipc(0)
 Error: Execution halted with the following contexts
