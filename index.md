@@ -190,7 +190,12 @@ Error: Execution halted with the following contexts
 
 > Relevant PR: [#311](https://github.com/pola-rs/r-polars/pull/311)
 
-It is common for *polars* users to query large datasets, and it is likely that such tasks will take a while. This could be a problem for users who run the code in an interactive fashion with interpreted languages like *R* and *Python*, as their console will stuck and the users have to wait until their large queries finish off. If we could offload the user tasks in the background and give back the control of the session, the users could continue to work on other independent routines, and only poll the results when necessary. The most intuitive solution from my perspective is to spawn a background thread to handle the user tasks in background, and return the corresponding thread handle to the user. This part is fairly straight forward to implement:
+It is common for *polars* users to query large datasets, and it is likely that such tasks will take a while. This could be a problem for users who run the code in an interactive fashion with interpreted languages like *R* and *Python*, as their console will stuck and the users have to wait until their large queries finish off. If we could offload the user tasks in the background and give back the control of the session, the users could continue to work on other independent routines, and only poll the results when necessary.
+
+
+### Background threads for query offloading
+
+The most intuitive solution from my perspective is to spawn a background thread to handle the user tasks in background, and return the corresponding thread handle to the user. This part is fairly straight forward to implement:
 
 ```rust
 pub struct RThreadHandle<T> {
@@ -222,7 +227,11 @@ shape: (32, 1)
 └───────┘
 ```
 
-It seems that I have already implemented all necessary functionalities to have the queries executable in background, but there is one caveat: if the queries involves native *R* functions, such as in `map` and `apply`, we have to find an available *R* interpreter to evaluate the *R* expressions, and *R* do not have proper multi-threading support. Naively we could reuse the existing user *R* session in such scenarios, but this could defeat the purpose of running the queries in background, and the shared single-threaded *R* interpreter could become the bottleneck of query performance since *polars* always uses multiple threads for computing if possible. We need a better solution for this.
+### Background *R* processes for background *R* evaluations
+
+It seems that I have already implemented all necessary functionalities to have the queries executable in background, but there is one caveat: if the queries involves native *R* functions, such as in `map` and `apply`, we have to find an available *R* interpreter to evaluate the *R* expressions, and *R* do not have proper multi-threading support.
+
+To solve this problem, naively we could reuse the existing user *R* session, but this could defeat the purpose of running the queries in background, as the user session will be interrupted and blocked by the hidden evaluations. Moreover, the shared single-threaded *R* interpreter could become the bottleneck of query performance since *polars* always uses multiple threads for computing if possible. We need a better solution for this.
 
 The only alternative option I have in mind is to spawn new *R* sessions, and use inter-process-communication (IPC) to transfer data across processes. I chose the [ipc-channel](https://github.com/servo/ipc-channel) crate for this purpose. To setup the connection between processes, I have to spawn a *R* process in *Rust* code, and invoke my custom *Rust* task handler in the child *R* interpreter:
 
@@ -270,9 +279,21 @@ impl RIPCJob {
 }
 ```
 
-Now we need to serialize and deserialize all relevant information across the IPC channel. For *R* functions and objects, I use the built-in *R* functions `serialize` and `deserialize` to them to bit vectors (i.e. `Vec<u8>`). For *polars* series, my initial implementation was first serializing it to bits and then transfering the bits across the channel, but the performance was not ideal when the series contain a lot of data. As suggested by the code above, eventually I chose to create shared memory across processes, and then send the information about the shared memory across the channel. In this way I can avoid transfering large amount of bits across the channel. But still, I have to serialize and deserialize the series, as I am unsure about the underlying structure of the series and could not directly create shared memory upon them, so there's still space for improvements.
+Now we need to serialize and deserialize all relevant information across the IPC channel.
 
-With the functionalities implemented above, we could already offload the user tasks to background, even with *R* functions involved. A minor problem is that we're always creating *R* processes when needed, and throwing them away when finished. This could be improved with a pool of live *R* processes where we could directly fetch and store *R* processes, and this could eliminate the unecessary (and costly) construction and destruction of *R* processes. I also implements common routines to shrink/expand the pool, lease/return the *R* process, and directly dispatching a task to an available *R* process. Initially, the pool only had a soft cap: if the cap is reached, new *R* processes could still be created but will be destroyed on finish. My mentor suggests that this may lead to unexpected behavior in performance from the users' perspective, and could make it hard for the users to limit the usages of additional *R* processes by the library. He refactored the implementation of the pool so that it now has a hard cap, and threads have to wait if the cap is reached while all existing *R* processes are in-use. Thanks a lot for his help!
+For *R* functions and objects, I use the built-in *R* functions `serialize` and `deserialize` to them to bit vectors (i.e. `Vec<u8>`).
+
+For *polars* series, my initial implementation was first serializing it to bits and then transfering the bits across the channel, but the performance was not ideal when the series contain a lot of data. As suggested by the code above, eventually I chose to create shared memory across processes, and then send the information about the shared memory across the channel. In this way I can avoid transfering large amount of bits across the channel.
+
+But still, I have to serialize and deserialize the *polars* series to and from bits. This is because I am unsure about the underlying structure of the series, as a result of which I could not directly create shared memory upon them, so there's still space for improvements.
+
+### Background *R* process pool for better overheads
+
+With the functionalities implemented above, we could already offload the user tasks to background, even with *R* functions involved, but we also have a minor problem: we're always creating *R* processes when needed, and throwing them away when finished.
+
+This could be improved with a pool of live *R* processes where we could directly fetch and store *R* processes, and this could eliminate the unecessary (and costly) construction and destruction of *R* processes.
+
+I also implements common routines to shrink/expand the pool, lease/return the *R* process, and directly dispatching a task to an available *R* process. Initially, the pool only had a soft cap: if the cap is reached, new *R* processes could still be created but will be destroyed on finish. My mentor suggests that this may lead to unexpected behavior in performance from the users' perspective, and could make it hard for the users to limit the usages of additional *R* processes by the library. He refactored the implementation of the pool so that it now has a hard cap, and threads have to wait if the cap is reached while all existing *R* processes are in-use. Thanks a lot for his help!
 
 Finally, we have a way to execute large queries in the background! For example:
 
