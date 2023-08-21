@@ -65,7 +65,7 @@ fn ignore_error() -> u64 {
 }
 ```
 
-The function above always try to get a successfully returned unsigned integer from `i64_to_u64` and then add one, but it will panic if `i64_to_u64` generates an error. We could do better:
+The `unwrap` method for `Result<T, E>` will assume that the result value is `Ok(t)` try to fetch the internal value `t`, but it will panic (i.e. stop the program with an unrecoverable error) if the result value is actually `Err(e)`, which is exactly the case in our example as `i64_to_u64` is guaranteed to generate an `Err(e)`. We can do better:
 
 ```rust
 fn handle_error() -> Result<u64, String> {
@@ -91,7 +91,7 @@ The vanilla `Result<T, E = String>` can be used to construct decent error messag
 
 So I implemented the following:
 
-- `Rctx`, which is the construction units of our errors
+- `Rctx`, which is the building block of our errors
 - `RPolarsErr`, which is basically a stack of `Rctx`s, just like stack traces 
 - `RResult<T>`, which is an alias of `Result<T, E = RPolarsErr>`, so we do not need to specify `E` every time
 
@@ -113,7 +113,7 @@ pub struct RPolarsErr {
 pub type RResult<T> = Result<T, RPolarsErr>;
 ```
 
-I used the [*thiserror*](https://github.com/dtolnay/thiserror) crate to generate nice error messages. The functionalities of `RPolarsErr` are similar to the [*anyhow*](https://github.com/dtolnay/anyhow) crate, but I did not use it since I could not find a way to extract the contexts in `anyhow::Error`, and I could not find a way to directly implement the `anyhow::Context` trait as it is sealed within the crate.
+I used the [*thiserror*](https://github.com/dtolnay/thiserror) crate to generate nice error messages. The functionalities of `RPolarsErr` are similar to the [*anyhow*](https://github.com/dtolnay/anyhow) crate. I did not use it because it is designed to merge errors of different types easily and then display them properly, but not maintaining these errors in their original forms. Then an `anyhow::Error` is equivalent to a properly constructed error message, as there is no other way to inspect its internals, and this will be hard for users to extract useful information from it.
 
 I also defined and implemented a `WithRctx<T>` trait to facilitate the construction of `RResult<T>`:
 
@@ -151,7 +151,7 @@ fn handle_error_nice() -> RResult<u64> {
 
 When `handle_error_nice` is called, we will construct a stack of errors. The only remaining tasks are displaying it properly to the users and provide a structural output so that the users could easily access the individual `Rctx`s.
 
-Thus I implemented the `std::fmt::Display` trait for `RPolarsErr`, which can convert `RPolarsErr` to a pretty string. I also exposed an `RPolarsErr` method in *R* so that users can directly access the `Rctx`s as a list, and updated the *R* wrappers to handle `RResult`. With all these implemented, we could test it out:
+Thus I implemented the `std::fmt::Display` trait for `RPolarsErr`, which can convert `RPolarsErr` to a pretty string. I also exposed an `RPolarsErr` method in *R* so that developers can directly access the `Rctx`s as a list, and updated the *R* wrappers to handle `RResult`. With all these implemented, we could test it out:
 
 ```R
 > handle_error_nice() |> unwrap("try unwrapping an error")
@@ -190,12 +190,12 @@ Error: Execution halted with the following contexts
 
 > Relevant PR: [#311](https://github.com/pola-rs/r-polars/pull/311)
 
-It is common for *polars* users to query large datasets, and it is likely that such tasks will take a while. This could be a problem for users who run the code in an interactive fashion with interpreted languages like *R* and *Python*, as their console will stuck and the users have to wait until their large queries finish off. If we could offload the user tasks in the background and give back the control of the session, the users could continue to work on other independent routines, and only poll the results when necessary.
+It is common for *polars* users to query large datasets, and it is likely that such tasks will take a while. This could be a problem for users who run the code in an interactive fashion with interpreted languages like *R* and *Python*, as their console will block and the users have to wait until their large queries finish off. If we could offload the user queries in the background and give back the session to the users, they could continue to work on other independent routines, and only poll the results when necessary.
 
 
 ### Background threads for query offloading
 
-The most intuitive solution from my perspective is to spawn a background thread to handle the user tasks in background, and return the corresponding thread handle to the user. This part is fairly straight forward to implement:
+The most intuitive solution from my perspective is to spawn a background thread to handle the user tasks in background, and return the corresponding thread handle to the user, similar to a future. This part is fairly straight forward to implement:
 
 ```rust
 pub struct RThreadHandle<T> {
@@ -285,7 +285,7 @@ For *R* functions and objects, I use the built-in *R* functions `serialize` and 
 
 For *polars* series, my initial implementation was first serializing it to bits and then transfering the bits across the channel, but the performance was not ideal when the series contain a lot of data. As suggested by the code above, eventually I chose to create shared memory across processes, and then send the information about the shared memory across the channel. In this way I can avoid transfering large amount of bits across the channel.
 
-But still, I have to serialize and deserialize the *polars* series to and from bits. This is because I am unsure about the underlying structure of the series, as a result of which I could not directly create shared memory upon them, so there's still space for improvements.
+But still, I have to serialize and deserialize the *polars* series to and from bits, and pass it through a buffered channel in shared memory. This is because I am unsure about the underlying structure of the series, as a result of which I could not directly create shared memory upon them, so potentially there's still space for improvements.
 
 ### Background *R* process pool for better overheads
 
